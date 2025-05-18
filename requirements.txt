@@ -8,3 +8,4 @@ transformers>=4.25.0
 plotly>=5.10.0
 nltk>=3.8.0
 xlsxwriter>=3.0.0
+streamlit-lottie
