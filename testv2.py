@@ -1,216 +1,179 @@
+import re
+import torch
+import speech_recognition as sr
+import requests
+import json
 import streamlit as st
-import sounddevice as sd
-import scipy.io.wavfile as wav
-from faster_whisper import WhisperModel
-from nltk.tokenize import sent_tokenize
-import tempfile
-import os
-import io
-import nltk
-import time
-import threading
-import queue
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 
-# Ensure punkt is downloaded for sentence tokenization
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
 
-st.set_page_config(page_title="Live Question Extractor", layout="wide")
-st.title("🎧 Live Question Extractor (Continuous Listening)")
+# Question logic
+QUESTION_WORDS = {
+    "what", "why", "how", "when", "where", "who", "whom", "which", "whose",
+    "is", "are", "do", "does", "did", "can", "could", "will", "would",
+    "should", "shall", "may", "might", "have", "has", "had", "am", "was", "were"
+}
 
-# --- Session State Initialization ---
-if "listening" not in st.session_state:
-    st.session_state.listening = False
-if "questions_log" not in st.session_state:
-    st.session_state.questions_log = []
-if "latest_status" not in st.session_state:
-    st.session_state.latest_status = "Click '▶️ Start Listening' to begin."
-if "audio_queue" not in st.session_state:
-    st.session_state.audio_queue = queue.Queue()
-if "processing_thread" not in st.session_state:
-    st.session_state.processing_thread = None
+QUESTION_PHRASES = [
+    "can you", "do you", "did you", "have you", "would you", "is it", "are you",
+    "could you", "will you", "should i", "why is", "how does", "what if", "am i"
+]
 
-# --- Sidebar Settings ---
-with st.sidebar:
-    st.header("🎛️ Settings")
-    duration = st.slider("Chunk Duration (seconds)", 3, 10, 5)
-    model_size = st.selectbox("Model size", ["base", "small", "medium", "large-v2"])
+IMPERATIVE_VERBS = [
+    "explain", "describe", "tell", "list", "define", "compare", "differentiate",
+    "outline", "summarize", "elaborate", "discuss"
+]
 
-    col1, col2 = st.columns(2)
-    with col1:
-        start_button = st.button("▶️ Start Listening")
-    with col2:
-        stop_button = st.button("⏹️ Stop Listening")
+DATA_KEYWORDS = {
+    "sql", "select", "insert", "update", "delete", "drop", "alter", "create", "table",
+    "join", "joins", "left join", "right join", "inner join", "outer join", "merge",
+    "group by", "having", "where", "order by", "window function", "cte", "union", "rank",
+    "dense_rank", "lead", "lag", "partition", "null", "vlookup", "xlookup", "excel",
+    "power bi", "powerbi", "pivot", "chart", "dax", "dashboard", "measure", "kpi",
+    "etl", "pipeline", "airflow", "dag", "job", "task", "bigquery", "snowflake", "spark",
+    "pandas", "numpy", "dataframe", "python", "read_csv", "fillna", "dropna", "query", "program"
+}
 
-# --- Load Whisper model (cached for efficiency) ---
-@st.cache_resource
-def load_model(size):
-    """
-    Loads the Whisper model. This function is cached to prevent reloading
-    the model on every Streamlit rerun, improving performance.
-    """
-    with st.spinner(f"Loading Whisper model: {size}. This may take a moment..."):
-        return WhisperModel(size, compute_type="int8", device="cpu")
+# Question detection
+def is_question(text: str) -> bool:
+    text = text.lower().strip()
+    words = re.findall(r'\b\w+\b', text)
 
-model = load_model(model_size)
+    if text.endswith("?"):
+        return True
+    if words and words[0] in QUESTION_WORDS:
+        return True
+    if words and words[0] in IMPERATIVE_VERBS:
+        return True
+    if any(phrase in text for phrase in QUESTION_PHRASES):
+        return True
+    if any(keyword in text for keyword in DATA_KEYWORDS):
+        return True
+    return False
 
-# --- Question Detection Logic ---
-def is_question(sentence):
-    """
-    Determines if a given sentence is likely a question based on
-    punctuation and common question words.
-    """
-    question_words = (
-        'what', 'when', 'where', 'who', 'whom', 'which',
-        'why', 'how', 'do', 'does', 'did', 'is', 'are', 'can',
-        'could', 'would', 'should', 'will', 'shall', 'may', 'might'
-    )
-    sentence_lower = sentence.lower().strip()
-    # Check for question mark or if it starts with a common question word
-    return (sentence_lower.endswith('?') or 
-            any(sentence_lower.startswith(qw + ' ') for qw in question_words))
-
-# --- Audio Processing Function ---
-def process_audio_chunk(audio_data, fs, model):
-    """Process a single audio chunk and return detected questions."""
-    tmpfile_path = None
+def ask_deepseek(question: str) -> str:
+    st.info("Asking DeepSeek LLM...")
     try:
-        # Create a temporary file with delete=False to handle manually
-        tmpfile = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        tmpfile_path = tmpfile.name
-        tmpfile.close()  # Close the file handle immediately
-        
-        # Write audio data to the temporary file
-        wav.write(tmpfile_path, fs, audio_data)
-        
-        # Transcribe the audio using the Whisper model
-        segments, _ = model.transcribe(tmpfile_path)
-        full_text = " ".join([seg.text for seg in segments])
-        
-        if full_text.strip():
-            # Extract sentences and identify questions
-            sentences = sent_tokenize(full_text)
-            questions = [s.strip() for s in sentences if is_question(s.strip())]
-            return full_text, questions
-        else:
-            return "", []
-            
+        response = requests.post(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer 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",
+                "Content-Type": "application/json",
+            },
+            data=json.dumps({
+                "model": "deepseek/deepseek-r1:free",  # Better for coding/sql
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an interview assistant bot. "
+                            "Answer each question in a very concise way, ideal for quick memory refresh. "
+                            "Limit answers to a 15 to 20 words"
+                            "Support coding and SQL questions too. Do not explain unless asked."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": question
+                    }
+                ]
+            })
+        )
+        return response.json()['choices'][0]["message"]["content"]
     except Exception as e:
-        st.error(f"Error processing audio: {e}")
-        return "", []
-    finally:
-        # Clean up the temporary file with retry logic for Windows
-        if tmpfile_path and os.path.exists(tmpfile_path):
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    os.unlink(tmpfile_path)
-                    break
-                except PermissionError:
-                    if attempt < max_retries - 1:
-                        time.sleep(0.1)  # Wait a bit before retrying
-                    else:
-                        # If we can't delete after retries, log the issue but don't crash
-                        print(f"Warning: Could not delete temporary file {tmpfile_path}")
-                except Exception:
-                    break  # File might already be deleted
+        return f"❌ LLM error: {e}"
 
-# --- Continuous Audio Recording Function ---
-def continuous_recording(duration, fs, audio_queue, stop_flag):
-    """Record audio continuously in chunks."""
-    while not stop_flag[0]:
-        try:
-            recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
-            sd.wait()
-            if not stop_flag[0]:  # Check if we should stop before adding to queue
-                audio_queue.put(recording)
-        except Exception as e:
-            print(f"Recording error: {e}")
-            break
+# Streamlit UI
+st.set_page_config(page_title="Real-time Audio Transcriber & Interview Assistant", layout="centered")
 
-# Handle button clicks
-if start_button and not st.session_state.listening:
+st.title("🗣️ Real-time Audio Transcriber")
+st.markdown("---")
+
+st.write(
+    "This application transcribes your speech in real-time. "
+    "If it detects a question, it will attempt to answer using the DeepSeek LLM. "
+    "Click 'Start Listening' to begin."
+)
+
+if 'listening' not in st.session_state:
+    st.session_state.listening = False
+if 'transcribed_text' not in st.session_state:
+    st.session_state.transcribed_text = ""
+if 'llm_answer' not in st.session_state:
+    st.session_state.llm_answer = ""
+if 'status_message' not in st.session_state:
+    st.session_state.status_message = "Ready to start listening."
+
+def start_listening_callback():
     st.session_state.listening = True
-    st.session_state.latest_status = "Starting to listen..."
-    st.session_state.audio_queue = queue.Queue()
-    
-    # Start continuous recording in a separate thread
-    stop_flag = [False]
-    st.session_state.stop_flag = stop_flag
-    recording_thread = threading.Thread(
-        target=continuous_recording,
-        args=(duration, 16000, st.session_state.audio_queue, stop_flag)
-    )
-    recording_thread.daemon = True
-    recording_thread.start()
-    st.session_state.recording_thread = recording_thread
+    st.session_state.transcribed_text = ""
+    st.session_state.llm_answer = ""
+    st.session_state.status_message = "🎤 Listening..."
 
-if stop_button and st.session_state.listening:
+def stop_listening_callback():
     st.session_state.listening = False
-    st.session_state.latest_status = "Stopped listening."
-    if hasattr(st.session_state, 'stop_flag'):
-        st.session_state.stop_flag[0] = True
+    st.session_state.status_message = "Stopped listening."
 
-# --- Main Content Area ---
-st.write(f"**Status:** {st.session_state.latest_status}")
+col1, col2 = st.columns(2)
 
-# Create containers for dynamic updates
-status_container = st.container()
-transcription_container = st.container()
-questions_container = st.container()
+with col1:
+    start_button = st.button("Start Listening", on_click=start_listening_callback, use_container_width=True)
+with col2:
+    stop_button = st.button("Stop Listening", on_click=stop_listening_callback, use_container_width=True)
 
-# --- Process Audio Queue ---
-if st.session_state.listening and not st.session_state.audio_queue.empty():
-    try:
-        # Get the latest audio chunk
-        audio_data = st.session_state.audio_queue.get_nowait()
-        
-        with status_container:
-            with st.spinner("Processing audio..."):
-                transcribed_text, new_questions = process_audio_chunk(audio_data, 16000, model)
-        
-        # Show transcribed text
-        if transcribed_text:
-            with transcription_container:
-                st.caption(f"**Latest transcription:** \"{transcribed_text}\"")
-        
-        # Add new questions to log
-        if new_questions:
-            st.session_state.questions_log.extend(new_questions)
-            st.session_state.latest_status = f"Detected {len(new_questions)} question(s)! Continuing to listen..."
-        else:
-            st.session_state.latest_status = "No questions detected. Continuing to listen..."
-            
-    except queue.Empty:
-        pass
-    except Exception as e:
-        st.error(f"Error processing audio: {e}")
-        st.session_state.listening = False
-        st.session_state.latest_status = "Error occurred. Listening stopped."
+st.markdown("---")
 
-# --- Display Questions ---
-with questions_container:
-    if st.session_state.questions_log:
-        st.markdown("### ❓ Detected Questions:")
-        
-        # Add a clear button
-        if st.button("🗑️ Clear Questions"):
-            st.session_state.questions_log = []
-            st.rerun()
-        
-        # Display questions with timestamps (newest first)
-        for i, question in enumerate(reversed(st.session_state.questions_log)):
-            st.markdown(f"**{len(st.session_state.questions_log) - i}.** {question}")
-    else:
-        st.info("No questions detected yet. Start listening to begin capturing questions.")
+st.subheader("Status")
+status_placeholder = st.empty()
+status_placeholder.write(st.session_state.status_message)
 
-# Auto-refresh when listening
+st.subheader("Transcribed Text")
+transcribed_text_placeholder = st.empty()
+transcribed_text_placeholder.write(st.session_state.transcribed_text)
+
+st.subheader("LLM Answer (if question detected)")
+llm_answer_placeholder = st.empty()
+llm_answer_placeholder.write(st.session_state.llm_answer)
+
+# Listen and respond loop within Streamlit
 if st.session_state.listening:
-    time.sleep(0.5)  # Small delay to prevent overwhelming
-    st.rerun()
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        recognizer.adjust_for_ambient_noise(source)
+        try:
+            audio = recognizer.listen(source, timeout=5, phrase_time_limit=8)
+            st.session_state.status_message = "⏳ Transcribing..."
+            status_placeholder.write(st.session_state.status_message)
+            
+            text = recognizer.recognize_google(audio)
+            st.session_state.transcribed_text = f"📝 You said: {text}"
+            transcribed_text_placeholder.write(st.session_state.transcribed_text)
 
-# --- Cleanup on app termination ---
-if not st.session_state.listening and hasattr(st.session_state, 'stop_flag'):
-    st.session_state.stop_flag[0] = True
+            if is_question(text):
+                st.session_state.status_message = "✅ Detected as a question! Getting answer..."
+                status_placeholder.write(st.session_state.status_message)
+                answer = ask_deepseek(text)
+                st.session_state.llm_answer = f"📘 Answer:\n{answer}"
+                llm_answer_placeholder.write(st.session_state.llm_answer)
+                st.session_state.status_message = "🎤 Listening..." # Resume listening message
+                status_placeholder.write(st.session_state.status_message)
+            else:
+                st.session_state.status_message = "No question detected. 🎤 Listening..."
+                status_placeholder.write(st.session_state.status_message)
+
+            # Re-run the Streamlit app to continue listening
+            st.rerun()
+
+        except sr.UnknownValueError:
+            st.session_state.status_message = "⚠️ Could not understand audio. 🎤 Listening..."
+            status_placeholder.write(st.session_state.status_message)
+            st.rerun()
+        except sr.WaitTimeoutError:
+            st.session_state.status_message = "⏰ Timeout — no speech. 🎤 Listening..."
+            status_placeholder.write(st.session_state.status_message)
+            st.rerun()
+        except Exception as e:
+            st.session_state.status_message = f"❌ Error: {e}. Stopping listening."
+            status_placeholder.write(st.session_state.status_message)
+            st.session_state.listening = False
+            st.rerun()
