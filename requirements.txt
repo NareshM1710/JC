@@ -1,16 +1,22 @@
-beautifulsoup4>=4.11.0
-fake-useragent>=1.1.0
-nltk>=3.8.0
-pandas>=1.4.0
-Pillow
-plotly>=5.10.0
-requests>=2.28.0
-streamlit>=1.22.0
-streamlit-card
-streamlit-carousel
-streamlit-lottie
-streamlit-option-menu
-torch>=2.0.0
-transformers>=4.25.0
-xlsxwriter>=3.0.0
+# Core Streamlit and Web Framework
+streamlit>=1.28.0
 
+# Audio Processing
+sounddevice>=0.4.6
+scipy>=1.10.0
+
+# Speech Recognition
+faster-whisper>=0.10.0
+
+# Natural Language Processing
+nltk>=3.8.0
+
+# Machine Learning Backend (required by faster-whisper)
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Utility Libraries
+numpy>=1.24.0
+
+# Additional dependencies
+ffmpeg-python>=0.2.0
