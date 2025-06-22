@@ -1,22 +1,5 @@
-# Core Streamlit and Web Framework
-streamlit>=1.28.0
-
-# Audio Processing
-sounddevice>=0.4.6
-scipy>=1.10.0
-
-# Speech Recognition
-faster-whisper>=0.10.0
-
-# Natural Language Processing
-nltk>=3.8.0
-
-# Machine Learning Backend (required by faster-whisper)
-torch>=2.0.0
-torchaudio>=2.0.0
-
-# Utility Libraries
-numpy>=1.24.0
-
-# Additional dependencies
-ffmpeg-python>=0.2.0
+streamlit
+SpeechRecognition
+requests
+transformers
+pyaudio
